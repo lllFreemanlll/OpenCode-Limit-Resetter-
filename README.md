@@ -350,3 +350,4 @@ Use the `.cmd` launcher (it passes `-ExecutionPolicy Bypass`), or run:
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\Reset-OpenCode.ps1 -Wait
 ```
+**The Final Solution is That.** , in General reset the Router to get New Network Config and ID/IP anyway.
