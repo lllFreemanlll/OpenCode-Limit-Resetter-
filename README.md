@@ -331,7 +331,7 @@ while it watches.
 Run `warp-cli mode warp` and reconnect. The script's `-Warp` mode does this
 automatically, including an elevated service restart if needed.
 
-**WARP Rotated & Connected but still "Free Limit" Appears Chat .**
+**WARP Rotated & Connected but still "Free Limit" Appears in Chat .**
 Fix : Change Warp Connection to HTTP or TLS Whatever , Should be Working
 , OpenCode Blocks VPN IPs Becouse They Exhausts The Free Limits Attempts
 
