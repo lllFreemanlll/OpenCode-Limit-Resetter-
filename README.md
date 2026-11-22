@@ -2,7 +2,7 @@
 
 `Reset-OpenCode.cmd` is the one-click entry point. It runs `Reset-OpenCode.ps1`,
 which performs the reset in a fixed order:
-
+- Reset Router Before All
 1. **Stop** the bridge / oplire proxy / OpenCode background service.
 2. **Repair config** (identity plugin, slash commands, state file).
 3. **Check or rotate egress** (VPN/router change by default; WARP optional).
