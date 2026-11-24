@@ -469,7 +469,7 @@ function Install-SlashCommand {
     Remove-Item (Join-Path $cmdRoot "opencode-unlimited.md") -Force -ErrorAction SilentlyContinue
     Remove-Item (Join-Path $cmdRoot "opencode-unlimited") -Recurse -Force -ErrorAction SilentlyContinue
 
-    $cli = Join-Path $script:ScriptDir "opencode-unlimited.ps1"
+    $cli = Join-Path $script:ScriptDir "unlimited-core.ps1"
     $tail = "`n`nAnswer with one short line about what the output above reported. No more."
     $defs = [ordered]@{
         "opencode-unlimited"       = @{ Args = "status"; Desc = "OpenCode free-tier helper - project id, egress ip, bucket" }

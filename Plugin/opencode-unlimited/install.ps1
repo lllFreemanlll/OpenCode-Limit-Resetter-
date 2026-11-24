@@ -2,7 +2,8 @@
 
 [CmdletBinding()]
 param(
-    [switch]$NoPath
+    [switch]$NoPath,
+    [switch]$NoPause
 )
 
 $ErrorActionPreference = "Stop"
@@ -10,7 +11,7 @@ $ErrorActionPreference = "Stop"
 $root = $PSScriptRoot
 $bin = Join-Path $root "bin"
 $entry = Join-Path $bin "opencode-unlimited.cmd"
-$ps1 = Join-Path $bin "opencode-unlimited.ps1"
+$ps1 = Join-Path $bin "unlimited-core.ps1"
 $pluginSrc = Join-Path $root "plugins\unlimited-shield.js"
 $bridge = Join-Path $root "lib\proxy-bridge.js"
 
@@ -21,21 +22,22 @@ $pluginDir = Join-Path $configDir "plugins"
 $pluginDst = Join-Path $pluginDir "unlimited-shield.js"
 
 function Ok($t) { Write-Host "  [+] $t" -ForegroundColor Green }
-function Bad($t) { Write-Host "  [x] $t" -ForegroundColor Red; exit 1 }
+function Bad($t) { Write-Host "  [x] $t" -ForegroundColor Red; if (-not $NoPause) { try { Read-Host "  Press Enter to close" | Out-Null } catch {} }; exit 1 }
 function Info($t) { Write-Host "      $t" -ForegroundColor DarkGray }
 
-Write-Host "==> opencode-unlimited install"
+Write-Host ""
+Write-Host "==> opencode-unlimited install" -ForegroundColor Cyan
 
 foreach ($required in @($entry, $ps1, $pluginSrc, $bridge)) {
-    if (-not (Test-Path $required)) { Bad "missing build artifact: $required" }
+    if (-not (Test-Path -LiteralPath $required)) { Bad "missing build artifact: $required" }
 }
 Ok "build artifacts present"
 
 $node = Get-Command node -ErrorAction SilentlyContinue
 if ($node) { Ok "node $((& $node.Source --version).Trim())" } else { Info "node not found: proxy bridge and -Db rotation stay unavailable" }
 
-if (-not (Test-Path $pluginDir)) { New-Item -ItemType Directory -Path $pluginDir -Force | Out-Null }
-Copy-Item $pluginSrc $pluginDst -Force
+if (-not (Test-Path -LiteralPath $pluginDir)) { New-Item -ItemType Directory -Path $pluginDir -Force | Out-Null }
+Copy-Item -LiteralPath $pluginSrc -Destination $pluginDst -Force
 Ok "plugin deployed: $pluginDst"
 
 if (-not $NoPath) {
@@ -64,7 +66,10 @@ Write-Host "  next:" -ForegroundColor Cyan
 Info "opencode-unlimited status     identity, plugin, network, bucket"
 Info "opencode-unlimited id         rotate the project id"
 Info "opencode-unlimited test       probe the bucket on this IP (free)"
-Info "opencode-unlimited proxy set socks5://127.0.0.1:1080   optional IP path"
 Write-Host ""
 Ok "installed"
 
+if ($env:RESETER_LAUNCHER -ne "1" -and -not $NoPause) {
+    Write-Host ""
+    try { Read-Host "  Press Enter to close this window" | Out-Null } catch { }
+}

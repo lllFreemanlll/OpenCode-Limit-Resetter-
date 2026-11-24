@@ -177,21 +177,70 @@ param(
     [switch]$DryRun,
     [switch]$Yes,
     [switch]$NoSplash,
+    [switch]$NoPause,
     [int]$WarpAttempts = 3
 )
 
 $ErrorActionPreference = "Stop"
+try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { }
+
+# ---------------------------------------------------------------------------
+# Crash guard: never let the window vanish before the error is readable.
+# ---------------------------------------------------------------------------
+$script:CrashLog  = Join-Path $env:USERPROFILE ".config\opencode\reseter-crash.log"
+$script:FromLauncher = ($env:RESETER_LAUNCHER -eq "1")
+
+function Wait-BeforeClose {
+    param([string]$Message = "  Press Enter to close this window")
+    if ($script:FromLauncher -or $NoPause) { return }
+    try {
+        if ($Host.Name -eq "ConsoleHost") {
+            Write-Host ""
+            Read-Host $Message | Out-Null
+        }
+    } catch { }
+}
+
+trap {
+    $err = $_
+    $stamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+    $lineText = ""
+    try { $lineText = [string]$err.InvocationInfo.Line } catch { }
+    $details = @(
+        "==== $stamp ====",
+        "message : $($err.Exception.Message)",
+        "type    : $($err.Exception.GetType().FullName)",
+        "script  : $($err.InvocationInfo.ScriptName)",
+        "line    : $($err.InvocationInfo.ScriptLineNumber)",
+        "command : $($lineText.Trim())",
+        "stack   :",
+        [string]$err.ScriptStackTrace,
+        ""
+    ) -join [Environment]::NewLine
+
+    Write-Host ""
+    Write-Host "  [ERROR] $($err.Exception.Message)" -ForegroundColor Red
+    Write-Host "  at line $($err.InvocationInfo.ScriptLineNumber): $($lineText.Trim())" -ForegroundColor DarkGray
+    try {
+        $dir = Split-Path -Parent $script:CrashLog
+        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+        Add-Content -LiteralPath $script:CrashLog -Value $details -Encoding UTF8
+        Write-Host "  crash log: $script:CrashLog" -ForegroundColor Yellow
+    } catch { }
+    Wait-BeforeClose
+    exit 1
+}
 
 # ---------------------------------------------------------------------------
 # Interactive mode: y/n prompts for each option
 # ---------------------------------------------------------------------------
 if ($Interactive) {
     Write-Host ""
-    Write-WarpBox @(
-        "RESET INTERACTIVE SETUP",
-        "  answer y/n for each option",
-        "  defaults shown in brackets"
-    ) -Color Cyan
+    Write-Host "  +------------------------------------------+" -ForegroundColor Cyan
+    Write-Host "  | RESET INTERACTIVE SETUP                  |" -ForegroundColor Cyan
+    Write-Host "  |   answer y/n for each option             |" -ForegroundColor Cyan
+    Write-Host "  |   defaults shown in brackets             |" -ForegroundColor Cyan
+    Write-Host "  +------------------------------------------+" -ForegroundColor Cyan
     Write-Host ""
 
     function Ask-Yn($Question, $Default = "n") {
@@ -228,7 +277,7 @@ if ($Interactive) {
     if ($doLive) { $LiveTest = $true }
 
     Write-Host ""
-    Write-Ok "interactive setup complete - starting reset..."
+    Write-Host "  [+] interactive setup complete - starting reset..." -ForegroundColor Green
     Write-Host ""
 }
 
@@ -246,6 +295,18 @@ $script:PluginFile  = Join-Path $script:ConfigDir "plugins\unlimited-shield.js"
 $script:TokenHelper = Join-Path $script:Root "Zero-OpenCodeTokens.py"
 $script:OpenCode    = $null
 $script:UnlimitedPs1= $null
+$script:UnlimitedCmd= $null
+$script:BundledDir = $null
+$script:PowerShellExe = $null
+try { $script:PowerShellExe = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName } catch { }
+if (-not $script:PowerShellExe -or -not (Test-Path -LiteralPath $script:PowerShellExe)) {
+    foreach ($candidate in @((Join-Path $PSHOME "powershell.exe"), (Join-Path $PSHOME "pwsh.exe"))) {
+        if ($candidate -and (Test-Path -LiteralPath $candidate)) { $script:PowerShellExe = $candidate; break }
+    }
+}
+if (-not $script:PowerShellExe) { $script:PowerShellExe = "powershell.exe" }
+$script:CmdExe = Join-Path $env:SystemRoot "System32\cmd.exe"
+if (-not (Test-Path -LiteralPath $script:CmdExe)) { $script:CmdExe = "cmd.exe" }
 $script:WarpCli        = $null
 $script:Python        = $null
 $script:InsideOpenCode = $false
@@ -902,7 +963,7 @@ Start-Sleep -Seconds 12
     try {
         Set-Content -LiteralPath $helper -Value $content -Encoding UTF8
         Write-Info "asking Windows for permission to restart the WARP service (UAC)..."
-        $proc = Start-Process -FilePath "powershell.exe" -Verb RunAs -ArgumentList ("-NoLogo -NoProfile -ExecutionPolicy Bypass -File `"" + $helper + "`"") -Wait -PassThru
+        $proc = Start-Process -FilePath $script:PowerShellExe -Verb RunAs -ArgumentList ("-NoLogo -NoProfile -ExecutionPolicy Bypass -File `"" + $helper + "`"") -Wait -PassThru
         return ($proc.ExitCode -eq 0)
     } catch {
         Write-Warn2 "elevation declined or failed; continuing without a service restart"
@@ -1058,6 +1119,14 @@ function Test-UnlimitedConfig {
             }
             if (-not ($names -contains "opencode-unlimited")) {
                 $issues += "slash commands missing"
+            } else {
+                $expectedCli = Join-Path $script:BundledDir "bin\unlimited-core.ps1"
+                $cmdProp = $cfg.commands.PSObject.Properties["opencode-unlimited"]
+                if ($cmdProp -and $cmdProp.Value -and $cmdProp.Value.template -and $expectedCli) {
+                    if ($cmdProp.Value.template -notlike ("*" + $expectedCli + "*")) {
+                        $issues += "slash commands point to the wrong folder"
+                    }
+                }
             }
         } catch {
             $issues += "opencode.json unreadable"
@@ -1075,9 +1144,69 @@ function Test-UnlimitedConfig {
 
 function Invoke-Unlimited {
     param([string[]]$ToolArgs)
-    $all = @("-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $script:UnlimitedPs1) + $ToolArgs
-    $out = Invoke-Native "powershell.exe" $all
-    return $out
+    if ($script:UnlimitedPs1) {
+        $all = @("-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $script:UnlimitedPs1) + $ToolArgs
+        return (Invoke-Native $script:PowerShellExe $all)
+    }
+    if ($script:UnlimitedCmd) {
+        return (Invoke-Native $script:CmdExe (@("/c", $script:UnlimitedCmd) + $ToolArgs))
+    }
+    return ""
+}
+
+function Install-Bundled {
+    $pluginSrc = Join-Path $script:BundledDir "plugins\unlimited-shield.js"
+    $cli = Join-Path $script:BundledDir "bin\unlimited-core.ps1"
+    if (-not (Test-Path -LiteralPath $pluginSrc)) { return $false }
+
+    try {
+        $pluginDir = Join-Path $script:ConfigDir "plugins"
+        if (-not (Test-Path -LiteralPath $pluginDir)) {
+            New-Item -ItemType Directory -Force -Path $pluginDir | Out-Null
+        }
+        Copy-Item -LiteralPath $pluginSrc -Destination $script:PluginFile -Force
+
+        $cfgPath = Join-Path $script:ConfigDir "opencode.jsonc"
+        if (-not (Test-Path -LiteralPath $cfgPath)) { $cfgPath = Join-Path $script:ConfigDir "opencode.json" }
+        $cfg = $null
+        if (Test-Path -LiteralPath $cfgPath) {
+            try {
+                $raw = [System.IO.File]::ReadAllText($cfgPath) -replace "^\uFEFF", ""
+                $cfg = $raw | ConvertFrom-Json
+            } catch { $cfg = $null }
+        }
+        if (-not $cfg) { $cfg = [pscustomobject]@{} }
+
+        if (-not $cfg.PSObject.Properties["commands"] -or -not $cfg.commands) {
+            $cfg | Add-Member -NotePropertyName commands -NotePropertyValue ([pscustomobject]@{}) -Force
+        }
+
+        $tail = "`n`nAnswer with one short line about what the output above reported. No more."
+        $defs = [ordered]@{
+            "opencode-unlimited"       = @{ Args = "status"; Desc = "OpenCode free-tier helper - project id, egress ip, bucket"; Cmd = $false }
+            "opencode-unlimited:test"  = @{ Args = "test"; Desc = "check the free bucket on this IP (free)"; Cmd = $false }
+            "opencode-unlimited:reset" = @{ Args = "reset"; Desc = "rotate a project (path optional), clear stuck limit errors"; Cmd = $true }
+            "opencode-unlimited:id"    = @{ Args = "id"; Desc = "rotate a project id, pass a folder to pick which"; Cmd = $true }
+        }
+
+        foreach ($name in $defs.Keys) {
+            $def = $defs[$name]
+            $argText = [string]$def.Args
+            if ($def.Cmd) { $argText = $argText + ' "$ARGUMENTS"' }
+            $template = '!`powershell -NoProfile -ExecutionPolicy Bypass -File "' + $cli + '" ' + $argText + '`' + $tail
+            $entry = [pscustomobject]@{ description = [string]$def.Desc; template = $template }
+            $cfg.commands | Add-Member -NotePropertyName $name -NotePropertyValue $entry -Force
+        }
+
+        [System.IO.File]::WriteAllText($cfgPath, ($cfg | ConvertTo-Json -Depth 20), (New-Object System.Text.UTF8Encoding($false)))
+        if (-not (Test-Path -LiteralPath $script:StateFile)) {
+            [System.IO.File]::WriteAllText($script:StateFile, "{}", (New-Object System.Text.UTF8Encoding($false)))
+        }
+        return $true
+    } catch {
+        Write-Warn2 ("portable plugin install failed: " + $_.Exception.Message)
+        return $false
+    }
 }
 
 function Repair-Config {
@@ -1098,9 +1227,12 @@ function Repair-Config {
             $out = Invoke-Unlimited @("install")
             if ($out -match "installed|done") {
                 Write-Ok "config repaired (plugin, slash commands, PATH, state)"
+            } elseif (Install-Bundled) {
+                Write-Ok "config repaired from bundled plugin (portable, no external tool needed)"
             } else {
-                Write-Warn2 "config repair returned an unexpected result"
-                Write-Info (($out -split "`n" | Where-Object { $_.Trim() } | Select-Object -First 4) -join " ")
+                Write-Warn2 "config repair failed; install the opencode-unlimited plugin manually"
+                $firstLines = @($out -split "`n" | Where-Object { $_.Trim() } | Select-Object -First 4)
+                if ($firstLines.Count -gt 0) { Write-Info ($firstLines -join " ") }
             }
         }
     } elseif ($issues.Count -eq 0) {
@@ -1412,6 +1544,10 @@ function Wait-ExternalEgress {
 # Identity rotation
 # ---------------------------------------------------------------------------
 function Reset-Identity {
+    if (-not $script:UnlimitedPs1 -and -not $script:UnlimitedCmd) {
+        Write-Warn2 "skipped: opencode-unlimited is not available on this PC"
+        return
+    }
     if ($DryRun) {
         $mode = if ($script:InsideOpenCode -and -not $ForceInside) { "id" } else { "reset" }
         Write-Info ("dry-run: would run opencode-unlimited " + $mode + " " + $Project)
@@ -1789,14 +1925,24 @@ if (-not (Test-Path -LiteralPath $script:ConfigDir)) {
 }
 
 $pf86 = [Environment]::GetEnvironmentVariable("ProgramFiles(x86)")
+$script:BundledDir = Join-Path $script:Root "Plugin\opencode-unlimited"
+if (-not (Test-Path -LiteralPath $script:BundledDir)) {
+    $legacyVendor = Join-Path $script:Root "vendor\opencode-unlimited"
+    if (Test-Path -LiteralPath $legacyVendor) { $script:BundledDir = $legacyVendor }
+}
 $script:OpenCode = Resolve-Tool -Name "opencode" -Candidates @(
     (Join-Path $env:LOCALAPPDATA "OpenCode\bin\opencode.cmd"),
     (Join-Path $env:APPDATA "npm\opencode.cmd")
 )
-$unlimitedCmd = Resolve-Tool -Name "opencode-unlimited" -Candidates @(
-    (Join-Path $env:USERPROFILE "Desktop\Opencode Niggfy\bin\opencode-unlimited.cmd"),
-    (Join-Path $env:USERPROFILE "Desktop\OpenCode-Unlimited\bin\opencode-unlimited.cmd")
-)
+$bundledCmd = Join-Path $script:BundledDir "bin\opencode-unlimited.cmd"
+$unlimitedCmd = if (Test-Path -LiteralPath $bundledCmd) {
+    $bundledCmd
+} else {
+    Resolve-Tool -Name "opencode-unlimited" -Candidates @(
+        (Join-Path $env:USERPROFILE "Desktop\Opencode Niggfy\bin\opencode-unlimited.cmd"),
+        (Join-Path $env:USERPROFILE "Desktop\OpenCode-Unlimited\bin\opencode-unlimited.cmd")
+    )
+}
 $script:WarpCli = Resolve-Tool -Name "warp-cli" -Candidates @(
     (Join-Path $env:ProgramFiles "Cloudflare\Cloudflare WARP\warp-cli.exe"),
     $(if ($pf86) { Join-Path $pf86 "Cloudflare\Cloudflare WARP\warp-cli.exe" } else { "" })
@@ -1848,6 +1994,7 @@ if ($Loop) {
 }
 
 if ($unlimitedCmd) {
+    $script:UnlimitedCmd = $unlimitedCmd
     $candidate = $unlimitedCmd -replace '\.(cmd|bat)$', '.ps1'
     if (Test-Path -LiteralPath $candidate) { $script:UnlimitedPs1 = $candidate }
     if (-not $script:UnlimitedPs1) {
@@ -1855,24 +2002,58 @@ if ($unlimitedCmd) {
         if (Test-Path -LiteralPath $sibling) { $script:UnlimitedPs1 = $sibling }
     }
 }
+if (-not $script:UnlimitedPs1) {
+    foreach ($candidatePath in @(
+        (Join-Path $script:BundledDir "bin\unlimited-core.ps1"),
+        (Join-Path $script:BundledDir "bin\opencode-unlimited.ps1"),
+        (Join-Path $script:Root "Plugin\unlimited-core.ps1"),
+        (Join-Path $script:Root "bin\unlimited-core.ps1"),
+        (Join-Path $script:Root "bin\opencode-unlimited.ps1"),
+        (Join-Path $script:Root "opencode-unlimited.ps1")
+    )) {
+        if (Test-Path -LiteralPath $candidatePath) { $script:UnlimitedPs1 = $candidatePath; break }
+    }
+}
+if (-not $script:UnlimitedCmd) {
+    foreach ($candidatePath in @(
+        (Join-Path $script:BundledDir "bin\opencode-unlimited.cmd"),
+        (Join-Path $script:Root "Plugin\opencode-unlimited\bin\opencode-unlimited.cmd"),
+        (Join-Path $script:Root "bin\opencode-unlimited.cmd")
+    )) {
+        if (Test-Path -LiteralPath $candidatePath) { $script:UnlimitedCmd = $candidatePath; break }
+    }
+}
 
 $missing = @()
-if (-not $script:OpenCode)     { $missing += "opencode" }
-if (-not $script:UnlimitedPs1) { $missing += "opencode-unlimited.ps1" }
 if ($Warp -and -not $script:WarpCli) { $missing += "warp-cli" }
-if (-not $NoZeroTokens) {
-    if (-not $script:Python) { $missing += "python" }
-    if (-not (Test-Path -LiteralPath $script:TokenHelper)) { $missing += "Zero-OpenCodeTokens.py" }
-}
 if ($missing.Count -gt 0) {
     Write-Err2 ("missing required tool(s): " + ($missing -join ", "))
-    if ($missing -contains "opencode-unlimited.ps1") {
-        Write-Info "install it first: powershell -ExecutionPolicy Bypass -File `"$env:USERPROFILE\Desktop\Opencode Niggfy\install.ps1`""
-    }
-    if ($missing -contains "python" -or $missing -contains "Zero-OpenCodeTokens.py") {
-        Write-Info "install Python, or rerun with -NoZeroTokens to skip token/context zeroing"
+    if ($missing -contains "warp-cli") {
+        Write-Info "install Cloudflare WARP, or run without -Warp and change your IP another way"
     }
     exit 1
+}
+
+if (-not $script:UnlimitedPs1 -and -not $script:UnlimitedCmd) {
+    Write-Warn2 "opencode-unlimited not found - identity rotation will be skipped"
+    Write-Info ("bundled copy expected at: " + (Join-Path $script:BundledDir "bin\opencode-unlimited.cmd"))
+    Write-Info "the rest of the reset still runs"
+}
+
+if (-not $NoZeroTokens) {
+    $zeroProblem = $null
+    if (-not $script:Python) { $zeroProblem = "python not found" }
+    elseif (-not (Test-Path -LiteralPath $script:TokenHelper)) { $zeroProblem = "token helper missing: " + $script:TokenHelper }
+    if ($zeroProblem) {
+        Write-Warn2 ($zeroProblem + " - token/context zeroing will be skipped")
+        Write-Info "install Python 3 from python.org, then rerun to zero counters"
+        $ZeroTokens = $false
+        $NoZeroTokens = $true
+        if ($Freeze) {
+            Write-Warn2 "freeze mode needs the token helper - freeze will be skipped too"
+            $Freeze = $false
+        }
+    }
 }
 
 $script:InsideOpenCode = Test-InsideOpenCode
@@ -2017,4 +2198,5 @@ try {
     }
 }
 
+Wait-BeforeClose
 exit $exitCode

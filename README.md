@@ -2,7 +2,7 @@
 
 `Reset-OpenCode.cmd` is the one-click entry point. It runs `Reset-OpenCode.ps1`,
 which performs the reset in a fixed order:
-- Reset Router Before All
+
 1. **Stop** the bridge / oplire proxy / OpenCode background service.
 2. **Repair config** (identity plugin, slash commands, state file).
 3. **Check or rotate egress** (VPN/router change by default; WARP optional).
@@ -71,7 +71,41 @@ Reset-OpenCode.cmd -Wait -ZeroTokens
 
 If you already changed the VPN before launching, the script notices the new IP
 against the previous run and does not wait.
-against the previous run and does not wait.
+
+## Portable setup (any PC)
+
+Copy the **whole folder** (not just the `.ps1`) to any PC, desktop, USB drive or
+network share. Nothing is tied to `C:\Users\<name>` or to this machine.
+
+```
+Reseter\
+  Reset-OpenCode.cmd      <- double-click this
+  Reset-OpenCode.ps1
+  Warp-Rotate.cmd         <- double-click for WARP only
+  Warp-Rotate.ps1
+  Zero-OpenCodeTokens.py
+  Plugin\opencode-unlimited\   <- bundled tool + plugin + slash commands
+    bin\opencode-unlimited.cmd
+    bin\unlimited-core.ps1
+    lib\proxy-bridge.js
+    plugins\unlimited-shield.js
+    install.ps1
+```
+
+Important details:
+
+- Always launch via the `.cmd` files. They use `%~dp0`, work with spaces in the
+  path, and **keep the window open** when something fails so the error is readable.
+- The `.cmd` launchers try `pwsh` first, then Windows PowerShell 5.1. No PowerShell
+  7 requirement.
+- The bundled tool is found relative to the launcher. If the folder is moved, the
+  reset rewrites the slash commands to the new path automatically.
+- Plugin install falls back to a built-in copy if `opencode-unlimited` is missing,
+  so the plugin and slash commands still install on a fresh PC.
+- Missing Python or warp-cli produces a clear warning instead of aborting the whole
+  reset (except `-Warp`, which genuinely needs warp-cli).
+- Errors are written to `%USERPROFILE%\.config\opencode\reseter-crash.log`. Send that
+  file if something looks wrong.
 
 ## Token/context zeroing
 
@@ -299,7 +333,13 @@ connecting, re-registers, and verifies the traced egress IP (`warp=on`).
 The script writes a log to:
 
 ```
-C:\Users\SSD\.config\opencode\resetter.log
+%USERPROFILE%\.config\opencode\resetter.log
+```
+
+If the launcher reports an error, also check:
+
+```
+%USERPROFILE%\.config\opencode\reseter-crash.log
 ```
 
 ## Safety notes
@@ -331,10 +371,6 @@ while it watches.
 Run `warp-cli mode warp` and reconnect. The script's `-Warp` mode does this
 automatically, including an elevated service restart if needed.
 
-**WARP Rotated & Connected but still "Free Limit" Appears in Chat .**
-Fix : Change Warp Connection to HTTP or TLS Whatever , Should be Working
-, OpenCode Blocks VPN IPs Becouse They Exhausts The Free Limits Attempts
-
 **The service did not come back.**
 Run `opencode service start`. The script also retries once in its `finally`
 block.
@@ -350,4 +386,3 @@ Use the `.cmd` launcher (it passes `-ExecutionPolicy Bypass`), or run:
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\Reset-OpenCode.ps1 -Wait
 ```
-**The Final Solution is That.** , in General reset the Router to get New Network Config and ID/IP anyway.
